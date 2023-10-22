@@ -9,9 +9,23 @@ namespace LZXAutoEngine
         private const string logFileName = "Activity.log";
         private readonly object lockObject = new object();
 
+        private string logMessage;
+        private int chunkRecords;
+        public const int chunkSize = 10;
+
         public Logger(LogLevel logLevel)
         {
             LogLevel = logLevel;
+            chunkRecords = 0;
+        }
+
+        ~Logger()
+        {
+            if (chunkRecords == 0) return;
+
+            File.AppendAllText(logFileName, logMessage);
+            chunkRecords = 0;
+            logMessage = "";
         }
 
         public LogLevel LogLevel { get; set; }
@@ -53,7 +67,15 @@ namespace LZXAutoEngine
 
             lock (lockObject)
             {
-                File.AppendAllText(logFileName, result);
+                ++chunkRecords;
+                if (chunkRecords <= chunkSize)
+                    logMessage += result;
+                else
+                {
+                    File.AppendAllText(logFileName, logMessage);
+                    chunkRecords = 0;
+                    logMessage = "";
+                }
             }
         }
     }
