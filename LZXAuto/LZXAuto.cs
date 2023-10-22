@@ -56,6 +56,8 @@ Debug   - Info + information about every file
 
 /binaryDB - binary database (default - xml)
 
+/skipSystem:off - process system files (default - on)
+
 /? or /help - displays this help screen
 
 filePath - root path to start. All subdirectories will be traversed. Default is root of current drive, like c:\.
@@ -212,7 +214,12 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
 
                 if (args.Contains("/binaryDB", StringComparer.InvariantCultureIgnoreCase))
                 {
-                    CompressorEngine.binaryDB = true;
+                    CompressorEngine.binaryDb = true;
+                }
+
+                if (args.Contains("/skipSystem:off", StringComparer.InvariantCultureIgnoreCase))
+                {
+                    CompressorEngine.skipSystem = false;
                 }
             }
 

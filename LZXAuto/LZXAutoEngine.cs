@@ -39,7 +39,8 @@ namespace LZXAutoEngine
 
         public Logger Logger { get; set; } = new Logger(LogLevel.General);
 
-        public bool binaryDB { get; set; } = false;
+        public bool binaryDb = false;
+        public bool skipSystem = true;
 
         public bool IsElevated
         {
@@ -218,7 +219,7 @@ namespace LZXAutoEngine
                     return;
                 }
 
-                if (fi.Attributes.HasFlag(FileAttributes.System))
+                if (skipSystem && fi.Attributes.HasFlag(FileAttributes.System))
                 {
                     ThreadUtils.InterlockedIncrement(ref fileCountSkippedByAttributes);
                     ThreadUtils.InterlockedAdd(ref totalDiskBytesPhysical, physicalSize1_Clusters);
@@ -345,7 +346,7 @@ namespace LZXAutoEngine
                     {
                         Logger.Log("Saving file...", 1, LogLevel.Debug);
 
-                        if (binaryDB)
+                        if (binaryDb)
                         {
                             BinaryFormatter binaryFormatter = new BinaryFormatter();
 
@@ -385,7 +386,7 @@ namespace LZXAutoEngine
                     {
                         if (readerFileStream.Length > 0)
                         {
-                            if (binaryDB)
+                            if (binaryDb)
                             {
                                 BinaryFormatter binaryFormatter = new BinaryFormatter();
 
