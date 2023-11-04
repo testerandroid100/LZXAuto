@@ -47,6 +47,17 @@ namespace LZXAutoEngine
             Log($"Error during processing: file: {fi.FullName}.{Environment.NewLine}Exception details: {ex}", 3);
         }
 
+        public void Flush()
+        {
+            lock (lockObject)
+            {
+                if (chunkRecords <= 0) return;
+                File.AppendAllText(logFileName, logMessage);
+                chunkRecords = 0;
+                logMessage = "";
+            }
+        }
+
         public void Log(string str, int newLinePrefix = 1, LogLevel level = LogLevel.Info, bool showTimeStamp = true)
         {
             if ((int)LogLevel < (int)level) return;

@@ -2353,31 +2353,31 @@ namespace ZeroDep
                         continue;
 
                     case '\\':
-                        builder.Append(@"\\");
+                        builder?.Append(@"\\");
                         continue;
 
                     case '\b':
-                        builder.Append(@"\b");
+                        builder?.Append(@"\b");
                         continue;
 
                     case '\t':
-                        builder.Append(@"\t");
+                        builder?.Append(@"\t");
                         continue;
 
                     case '\n':
-                        builder.Append(@"\n");
+                        builder?.Append(@"\n");
                         continue;
 
                     case '\f':
-                        builder.Append(@"\f");
+                        builder?.Append(@"\f");
                         continue;
 
                     case '\r':
-                        builder.Append(@"\r");
+                        builder?.Append(@"\r");
                         continue;
 
                     case '"':
-                        builder.Append("\\\"");
+                        builder?.Append("\\\"");
                         continue;
                 }
 

@@ -15,14 +15,19 @@ namespace LZXAuto
         private const string TaskScheduleName = "LZXAuto";
         private const string TaskScheduleTemplateFileName = "LZXAutoTask.xml";
 
-        private static readonly LZXAutoEngine.LZXAutoEngine CompressorEngine = new LZXAutoEngine.LZXAutoEngine();
+        private static LZXAutoEngine.LZXAutoEngine CompressorEngine = new LZXAutoEngine.LZXAutoEngine();
+
+        ~LZXAuto()      // finalizer
+        {
+            CompressorEngine = null;
+        }
 
         private static void Main(string[] args)
         {
             var thisprocessname = Process.GetCurrentProcess().ProcessName;
             if (Process.GetProcesses().Count(p => p.ProcessName == thisprocessname) > 1)
             {
-                CompressorEngine.Logger.Log("Another instance is already running. Exiting...", 2, LogLevel.General);
+                CompressorEngine.logger.Log("Another instance is already running. Exiting...", 2, LogLevel.General);
                 return;
             }
 
@@ -98,7 +103,7 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
                 return;
             }
 
-            CompressorEngine.Logger.LogLevel = LogLevel.Info;
+            CompressorEngine.logger.LogLevel = LogLevel.Info;
 
             // Parse log level option, like: /q:general
             if (!string.IsNullOrEmpty(commandLine))
@@ -107,7 +112,7 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
                 var match = rx.Match(commandLine);
                 if (match.Success)
                 {
-                    CompressorEngine.Logger.LogLevel = LogLevel.None;
+                    CompressorEngine.logger.LogLevel = LogLevel.None;
 
                     var modeStr = match.Groups["mode"]?.Value;
                     if (modeStr != null)
@@ -122,7 +127,7 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
                                 return;
                             }
 
-                            CompressorEngine.Logger.LogLevel = logL;
+                            CompressorEngine.logger.LogLevel = logL;
                         }
                     }
                 }
@@ -135,60 +140,59 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
                 foreach (var arg in args)
                 {
                     var rx = new Regex(@"[a-z]:\\", RegexOptions.IgnoreCase);
-                    if (!string.IsNullOrEmpty(rx.Match(arg).Value))
-                    {
-                        commandLineRequestedPath = arg;
-                        if (!commandLineRequestedPath.EndsWith("\\")) commandLineRequestedPath += "\\";
-                    }
+                    if (string.IsNullOrEmpty(rx.Match(arg).Value)) continue;
+
+                    commandLineRequestedPath = arg;
+                    if (commandLineRequestedPath.EndsWith("\""))
+                        commandLineRequestedPath = commandLineRequestedPath.Remove(commandLineRequestedPath.Length-1, 1);
+
+                    if (!commandLineRequestedPath.EndsWith("\\")) commandLineRequestedPath += "\\";
                 }
 
                 // Parse scheduleOn option
                 if (args.Contains("/scheduleOn", StringComparer.InvariantCultureIgnoreCase))
                 {
                     var currentProcess = Process.GetCurrentProcess();
-                    if (currentProcess.MainModule != null)
+                    if (currentProcess.MainModule == null) return;
+
+                    var currentProcessPath = currentProcess.MainModule.FileName;
+
+                    var requestedPath = commandLineRequestedPath;
+                    if (string.IsNullOrEmpty(requestedPath))
+                        requestedPath = Path.GetPathRoot(currentProcessPath);
+
+                    var newCommandNode = $"<Command>\"{currentProcessPath}\"</Command>";
+                    var newArgumentsNode = $"<Arguments>{requestedPath}</Arguments>";
+                    var newWorkingDirectoryNode =
+                        $"<WorkingDirectory>{Path.GetDirectoryName(currentProcessPath)}</WorkingDirectory>";
+
+                    ReplaceTextInFile(TaskScheduleTemplateFileName, "<Command></Command>", newCommandNode);
+                    ReplaceTextInFile(TaskScheduleTemplateFileName, "<Arguments></Arguments>", newArgumentsNode);
+                    ReplaceTextInFile(TaskScheduleTemplateFileName, "<WorkingDirectory></WorkingDirectory>",
+                        newWorkingDirectoryNode);
+
+                    try
                     {
-                        var currentProcessPath = currentProcess.MainModule.FileName;
+                        var proc = new Process();
+                        proc.StartInfo.FileName = "schtasks";
+                        proc.StartInfo.Arguments =
+                            $"/Create /XML {TaskScheduleTemplateFileName} /tn {TaskScheduleName}";
+                        proc.StartInfo.UseShellExecute = false;
+                        proc.StartInfo.RedirectStandardOutput = true;
+                        proc.Start();
+                        proc.WaitForExit();
+                        var exitCode = proc.ExitCode;
+                        Console.WriteLine(exitCode == 0 ? "Schedule initialized" : "Schedule initialization failed");
 
-                        var requestedPath = commandLineRequestedPath;
-                        if (string.IsNullOrEmpty(requestedPath))
-                            requestedPath = Path.GetPathRoot(currentProcessPath);
-
-                        var newCommandNode = $"<Command>\"{currentProcessPath}\"</Command>";
-                        var newArgumentsNode = $"<Arguments>{requestedPath}</Arguments>";
-                        var newWorkingDirectoryNode =
-                            $"<WorkingDirectory>{Path.GetDirectoryName(currentProcessPath)}</WorkingDirectory>";
-
-                        ReplaceTextInFile(TaskScheduleTemplateFileName, "<Command></Command>", newCommandNode);
-                        ReplaceTextInFile(TaskScheduleTemplateFileName, "<Arguments></Arguments>", newArgumentsNode);
-                        ReplaceTextInFile(TaskScheduleTemplateFileName, "<WorkingDirectory></WorkingDirectory>",
-                            newWorkingDirectoryNode);
-
-                        try
-                        {
-                            var proc = new Process();
-                            proc.StartInfo.FileName = "schtasks";
-                            proc.StartInfo.Arguments =
-                                $"/Create /XML {TaskScheduleTemplateFileName} /tn {TaskScheduleName}";
-                            proc.StartInfo.UseShellExecute = false;
-                            proc.StartInfo.RedirectStandardOutput = true;
-                            proc.Start();
-                            proc.WaitForExit();
-                            var exitCode = proc.ExitCode;
-                            Console.WriteLine(exitCode == 0
-                                ? "Schedule initialized"
-                                : "Schedule initialization failed");
-
-                            proc.Close();
-                        }
-                        finally
-                        {
-                            ReplaceTextInFile(TaskScheduleTemplateFileName, newCommandNode, "<Command></Command>");
-                            ReplaceTextInFile(TaskScheduleTemplateFileName, newArgumentsNode,
-                                "<Arguments></Arguments>");
-                            ReplaceTextInFile(TaskScheduleTemplateFileName, newWorkingDirectoryNode,
-                                "<WorkingDirectory></WorkingDirectory>");
-                        }
+                        proc.Close();
+                    }
+                    finally
+                    {
+                        ReplaceTextInFile(TaskScheduleTemplateFileName, newCommandNode, "<Command></Command>");
+                        ReplaceTextInFile(TaskScheduleTemplateFileName, newArgumentsNode,
+                            "<Arguments></Arguments>");
+                        ReplaceTextInFile(TaskScheduleTemplateFileName, newWorkingDirectoryNode,
+                            "<WorkingDirectory></WorkingDirectory>");
                     }
 
                     return;
@@ -204,8 +208,7 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
                     proc.StartInfo.RedirectStandardOutput = true;
                     proc.Start();
                     proc.WaitForExit();
-                    var exitCode = proc.ExitCode;
-                    Console.WriteLine(exitCode == 0 ? "Schedule deleted" : "Schedule deletion failed");
+                    Console.WriteLine(proc.ExitCode == 0 ? "Schedule deleted" : "Schedule deletion failed");
 
                     proc.Close();
 
@@ -213,14 +216,10 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
                 }
 
                 if (args.Contains("/binaryDB", StringComparer.InvariantCultureIgnoreCase))
-                {
                     CompressorEngine.binaryDb = true;
-                }
 
                 if (args.Contains("/skipSystem:off", StringComparer.InvariantCultureIgnoreCase))
-                {
                     CompressorEngine.skipSystem = false;
-                }
             }
 
             string[] skipFileExtensions;
@@ -235,19 +234,18 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
                 var extArray = jsonDict["skipFileExtensions"];
                 foreach (var ext in extArray)
                 {
-                    string value = Convert.ToString(ext);
-                    extList.Add(value);
+                    extList.Add(Convert.ToString(ext));
                 }
 
                 skipFileExtensions = extList.ToArray();
             }
             catch (Exception ex)
             {
-                CompressorEngine.Logger.Log(ex, "Could not parse LZXAutoConfig.json");
+                CompressorEngine.logger.Log(ex, "Could not parse LZXAutoConfig.json");
                 return;
             }
 
-            CompressorEngine.Process(commandLineRequestedPath, skipFileExtensions);
+            CompressorEngine.Process(commandLineRequestedPath, ref skipFileExtensions);
         }
 
         private static void CurrentDomain_ProcessExit(object sender, EventArgs e)

@@ -9,7 +9,7 @@ namespace LZXAutoEngine
         private static readonly string[] BinaryPrefix = { "bytes", "KB", "MB", "GB", "TB" }; // , "PB", "EB", "ZB", "YB"
 
         private static uint lpSectorsPerCluster, lpBytesPerSector, lpNumberOfFreeClusters, lpTotalNumberOfClusters;
-        
+
         [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
         private static extern bool GetDiskFreeSpace(string lpRootPathName, out uint lpSectorsPerCluster,
             out uint lpBytesPerSector, out uint lpNumberOfFreeClusters, out uint lpTotalNumberOfClusters);
@@ -48,9 +48,19 @@ namespace LZXAutoEngine
         public static ulong GetPhysicalFileSize(string fileName)
         {
             var low = GetCompressedFileSizeW(fileName, out var high);
-            var error = Marshal.GetLastWin32Error();
-            if (low == 0xFFFFFFFF && error != 0)
+            if (low == 0xFFFFFFFF)
+            {
+                if (high != 0)
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    if (error != 0) return 0;
+
+                    return ((ulong)high << 32) + low;
+                }
+
                 return 0;
+            }
+
             //throw new Win32Exception(error, "Error while getting physical file size");
             return ((ulong)high << 32) + low;
         }
