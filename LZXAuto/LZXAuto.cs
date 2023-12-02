@@ -53,13 +53,9 @@ General - Session start / end timestamp, skipped folders
 Info    - General + statistics about current session
 Debug   - Info + information about every file
 
-/resetDb - resets db. On next run, all files will be traversed by Compact command.
-
 /scheduleOn - enables Task Scheduler entry to run LZXAuto when computer is idle for 10 minutes. Task runs daily.
 
 /scheduleOff - disables Task Scheduler entry
-
-/binaryDB - binary database (default - xml)
 
 /skipSystem:off - process system files (default - on)
 
@@ -93,13 +89,6 @@ LZXAuto /scheduleOn c:\
 Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
 ");
 
-                return;
-            }
-
-            // Parse resetDb option
-            if (args != null && args.Contains("/resetDb", StringComparer.InvariantCultureIgnoreCase))
-            {
-                CompressorEngine.ResetDb();
                 return;
             }
 
@@ -215,9 +204,6 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
 
                     return;
                 }
-
-                if (args.Contains("/binaryDB", StringComparer.InvariantCultureIgnoreCase))
-                    CompressorEngine.binaryDb = true;
 
                 if (args.Contains("/skipSystem:off", StringComparer.InvariantCultureIgnoreCase))
                     CompressorEngine.skipSystem = false;

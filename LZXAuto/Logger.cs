@@ -92,10 +92,10 @@ namespace LZXAutoEngine
             }
         }
 
-        public void ShowDiskStats(int actualFiles, ref ulong totalDiskBytesPhysical, ref ulong totalDiskBytesLogical)
+        public void ShowDiskStats(uint actualFiles, ref ulong totalDiskBytesPhysical, ref ulong totalDiskBytesLogical)
         {
             var str =
-                $"Current progress: Files - {actualFiles}, Disk physical/logical: {totalDiskBytesPhysical.GetMemoryString()}/{totalDiskBytesLogical.GetMemoryString()}";
+                $"Disk stats: Files - {actualFiles}, Disk physical/logical: {totalDiskBytesPhysical.GetMemoryString()}/{totalDiskBytesLogical.GetMemoryString()}";
             Console.WriteLine(str);
             Console.SetCursorPosition(0, Console.CursorTop - 1);
         }
