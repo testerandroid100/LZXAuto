@@ -23,21 +23,25 @@ namespace LZXAutoEngine
 
         private ulong compactCommandBytesRead;
         private ulong compactCommandBytesWritten;
-        private uint dictEntriesCount0;
+        private uint dictEntriesCount;
+        private int actualDictEntriesCount;
 
         private uint fileCountProcessedByCompactCommand;
         private uint fileCountSkipByNoChange;
         private uint fileCountSkippedByAttributes;
         private uint fileCountSkippedByExtension;
-        private ConcurrentDictionary<byte[], ulong> fileDict = new ConcurrentDictionary<byte[], ulong>();
-        private ConcurrentDictionary<byte[], ulong> actualFileDict = new ConcurrentDictionary<byte[], ulong>();
+
+        private ConcurrentDictionary<string, ulong> fileDict = new ConcurrentDictionary<string, ulong>();
+
+        private readonly object actualDbLockObject = new object();
+        private ConcurrentDictionary<string, ulong> actualFileDict = new ConcurrentDictionary<string, ulong>();
 
 #if DEBUG
-        private ConcurrentDictionary<byte[], string> debugFileDictStr = new ConcurrentDictionary<byte[], string>();
+        private ConcurrentDictionary<string, string> debugFileDictStr = new ConcurrentDictionary<string, string>();
 #endif
 
         private string[] skipFileExtensions;
-        private int threadQueueLength;
+        private volatile int threadQueueLength;
 
         private ulong totalDiskBytesLogical;
         private ulong totalDiskBytesPhysical;
@@ -47,7 +51,10 @@ namespace LZXAutoEngine
         public bool binaryDb = false;
         public bool skipSystem = true;
 
-        private readonly object actualDbLockObject = new object();
+        private readonly object threadObject = new object();
+        private readonly object logObject = new object();
+
+        private DateTime logFileStatTime;
 
         ~LZXAutoEngine() // finalizer
         {
@@ -70,31 +77,34 @@ namespace LZXAutoEngine
         {
             skipFileExtensions = skipFileExtensionsArr ?? new string[] { };
 
+            if (path.EndsWith("\\") && path.Length > 3)
+                path = path.Remove(path.Length - 1, 1);
+
             var driveCapacity = DriveUtils.GetDriveCapacity(path);
             var driveFreeSpace = DriveUtils.GetDriveFreeSpace(path);
 
             logger.Log($"{Environment.NewLine}", 1, LogLevel.Info, false);
             logger.Log(
                 $"Starting new compressing session. LZXAuto version: {Assembly.GetEntryAssembly()?.GetName().Version}");
-            logger.Log($"Driver state:");
+            logger.Log("Driver state:");
             logger.Log($"Capacity:{driveCapacity.GetMemoryString()}");
             logger.Log($"Free space:{driveFreeSpace.GetMemoryString()}");
             logger.Log($"Running in Administrator mode: {IsElevated}");
             logger.Log($"Starting path {path}{Environment.NewLine}");
 
             var startTimeStamp = DateTime.Now;
+            logFileStatTime = startTimeStamp;
 
             fileDict = LoadDictFromFile(dbFileName);
 
             Action<DirectoryInfo> processDirectory = null;
-            processDirectory = (di) =>
+            processDirectory = di =>
             {
                 try
                 {
                     var files = di.EnumerateFiles("*", SearchOption.TopDirectoryOnly);
 
                     foreach (var fi in files)
-                    {
                         try
                         {
                             if (cancelToken.IsCancellationRequested)
@@ -105,37 +115,55 @@ namespace LZXAutoEngine
 
                             try
                             {
-                                Interlocked.Increment(ref threadQueueLength);
-                                ThreadPool.QueueUserWorkItem(a => { ProcessFile(fi); });
+                                bool allowAddThread;
+                                lock (threadObject)
+                                {
+                                    allowAddThread = threadQueueLength < maxQueueLength;
 
-                                // Do not let queue length more items than MaxQueueLength
-                                while (threadQueueLength > maxQueueLength)
+                                    if (allowAddThread)
+                                    {
+                                        Interlocked.Increment(ref threadQueueLength);
+                                        ThreadPool.QueueUserWorkItem(a => { ProcessFile(fi); });
+                                    }
+                                }
+
+                                if (allowAddThread) continue;
+
+                                while (threadQueueLength >= maxQueueLength)
                                     Thread.Sleep(treadPoolWaitMs);
                             }
                             catch (Exception ex)
                             {
-                                logger.Log(ex, fi);
+                                lock (logObject)
+                                {
+                                    logger.Log(ex, fi);
+                                }
                             }
                         }
                         catch (UnauthorizedAccessException)
                         {
-                            logger.Log($"Access failed to folder: {di.FullName}", 2, LogLevel.General);
+                            lock (logObject)
+                            {
+                                logger.Log($"Access failed to folder: {di.FullName}", 2, LogLevel.General);
+                            }
                         }
                         catch (Exception ex)
                         {
-                            logger.Log(ex, di);
+                            lock (logObject)
+                            {
+                                logger.Log(ex, di);
+                            }
                         }
-                    }
 
                     var directories = di.EnumerateDirectories("*", SearchOption.TopDirectoryOnly);
-                    foreach (var nextDi in directories)
-                    {
-                        processDirectory(nextDi);
-                    }
+                    foreach (var nextDi in directories) processDirectory(nextDi);
                 }
                 catch (Exception ex)
                 {
-                    logger.Log($"Unable to process folder {di.FullName}: {ex.Message}", 1, LogLevel.General);
+                    lock (logObject)
+                    {
+                        logger.Log($"Unable to process folder {di.FullName}: {ex.Message}", 1, LogLevel.General);
+                    }
                 }
             };
 
@@ -157,7 +185,7 @@ namespace LZXAutoEngine
 
             // actualize dbFile
             Action<DirectoryInfo> actualizeDbRecords = null;
-            actualizeDbRecords = (di) =>
+            actualizeDbRecords = di =>
             {
                 if (di.FullName == dirTop.FullName) return;
 
@@ -174,25 +202,42 @@ namespace LZXAutoEngine
 
                         try
                         {
-                            var filePathHash = (fi.Name + fi.LastWriteTime).GenerateHashCode();
+                            var bytesArray = (fi.Name + fi.LastWriteTime).GenerateHashCode();
+                            var nameHash = Convert.ToBase64String(bytesArray, Base64FormattingOptions.InsertLineBreaks);
+                            var hashExistInOldDict = false;
 
-                            lock (actualDbLockObject)
+                            string fullNameHash = "";
+                            ulong physicalSizeClusters = 0;
+
+                            if (fileDict.TryGetValue(nameHash, out var value))
                             {
-                                if (fileDict.TryGetValue(filePathHash, out var dictFileSize))
-                                {
-                                    var physicalSizeClusters = DriveUtils.GetPhysicalFileSize(fi.FullName);
-
-                                    if (dictFileSize == physicalSizeClusters)
-                                    {
-                                        fileDict.TryRemove(filePathHash, out _);
-                                        actualFileDict[filePathHash] = physicalSizeClusters;
-                                    }
-                                }
+                                physicalSizeClusters = DriveUtils.GetPhysicalFileSize(fi.FullName);
+                                hashExistInOldDict = (value == physicalSizeClusters);
                             }
 
-                            // Do not let queue length more items than MaxQueueLength
-                            while (threadQueueLength > maxQueueLength)
-                                Thread.Sleep(treadPoolWaitMs);
+                            if (!hashExistInOldDict)
+                            {
+                                fullNameHash = Convert.ToBase64String(fi.FullName.GenerateHashCode(),
+                                    Base64FormattingOptions.InsertLineBreaks);
+                                if (physicalSizeClusters == 0)
+                                    physicalSizeClusters = DriveUtils.GetPhysicalFileSize(fi.FullName);
+                                hashExistInOldDict = fileDict.ContainsKey(fullNameHash) &&
+                                                   fileDict[fullNameHash] == physicalSizeClusters;
+                            }
+
+                            if (hashExistInOldDict)
+                            {
+                                lock (actualDbLockObject)
+                                {
+                                    var result = AddRecordToActualFileDict(ref nameHash, ref fullNameHash, fi, physicalSizeClusters);
+                                    if (result) ++actualDictEntriesCount;
+
+                                    DebugCheckDuplicates(ref nameHash, ref fullNameHash, fi);
+
+                                    Console.WriteLine($"Database records: {actualDictEntriesCount}");
+                                    Console.SetCursorPosition(0, Console.CursorTop - 1);
+                                }
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -201,10 +246,7 @@ namespace LZXAutoEngine
                     }
 
                     var directories = di.EnumerateDirectories("*", SearchOption.TopDirectoryOnly);
-                    foreach (var nextDi in directories)
-                    {
-                        actualizeDbRecords(nextDi);
-                    }
+                    foreach (var nextDi in directories) actualizeDbRecords(nextDi);
                 }
                 catch (Exception)
                 {
@@ -217,11 +259,12 @@ namespace LZXAutoEngine
             var driveRoot = new DirectoryInfo(path.Substring(0, 2) + "\\");
             actualizeDbRecords(driveRoot);
 
-            SaveDictToFile(dbFileName, actualFileDict);
+            SaveDictToFile(dbFileName, ref actualFileDict);
 
             ts = DateTime.Now.Subtract(actualizeDbTimeStamp);
             logger.Log(
-                $"Actualize database completed in [hh:mm:ss:ms]: {ts.Hours:00}:{ts.Minutes:00}:{ts.Seconds:00}:{ts.Milliseconds:00}{Environment.NewLine}");
+                $"Actualize database completed in [hh:mm:ss:ms]: {ts.Hours:00}:{ts.Minutes:00}:{ts.Seconds:00}:{ts.Milliseconds:00}{Environment.NewLine}",
+                2);
             logger.Flush();
 
             logger.Log("All operations completed.");
@@ -252,8 +295,8 @@ namespace LZXAutoEngine
                 $"Files skipped by extension: {fileCountSkippedByExtension}{Environment.NewLine}" +
                 $"Files skipped by no change: {fileCountSkipByNoChange}{Environment.NewLine}" +
                 $"Files processed by compact command line: {fileCountProcessedByCompactCommand}{Environment.NewLine}" +
-                $"Files in db: {actualFileDict?.Count ?? 0}{Environment.NewLine}" +
-                $"Files in db delta: {(actualFileDict?.Count ?? 0) - dictEntriesCount0}{Environment.NewLine}" +
+                $"Files in db: {actualDictEntriesCount}{Environment.NewLine}" +
+                $"Files in db delta: {actualDictEntriesCount - dictEntriesCount}{Environment.NewLine}" +
                 $"Files visited: {totalFilesVisited}{Environment.NewLine}" +
                 $"{Environment.NewLine}" +
                 $"Bytes read: {compactCommandBytesRead.GetMemoryString()}{Environment.NewLine}" +
@@ -272,7 +315,7 @@ namespace LZXAutoEngine
                 $"Perf stats:{Environment.NewLine}" +
                 $"Time elapsed[hh:mm:ss:ms]: {ts.Hours:00}:{ts.Minutes:00}:{ts.Seconds:00}:{ts.Milliseconds:00}{Environment.NewLine}" +
                 $"Compressed files per minute: {fileCountProcessedByCompactCommand / ts.TotalMinutes:0.00}{Environment.NewLine}" +
-                $"Files per minute: {totalFilesVisited / ts.TotalMinutes:0.00}", 1, LogLevel.General, false);
+                $"Files per minute: {totalFilesVisited / ts.TotalMinutes:0.00}", 2, LogLevel.General, false);
 
             logger.Flush();
         }
@@ -281,25 +324,64 @@ namespace LZXAutoEngine
         {
             try
             {
+                if (fi.Length <= 0) return;
+
                 var prevPhysicalSizeClusters = DriveUtils.GetPhysicalFileSize(fi.FullName);
                 if (prevPhysicalSizeClusters == 0) return;
 
                 var logicalSizeClusters = DriveUtils.GetDiskOccupiedSpace((ulong)fi.Length, fi.FullName);
-                ThreadUtils.InterlockedAdd(ref totalDiskBytesLogical, logicalSizeClusters);
 
                 if (skipFileExtensions.Any(c => c == fi.Extension))
                 {
-                    logger.Log($"Skipping file: '{fi.FullName}' by extensions list.", 1, LogLevel.Debug);
-                    ThreadUtils.InterlockedIncrement(ref fileCountSkippedByExtension);
-                    ThreadUtils.InterlockedAdd(ref totalDiskBytesPhysical, prevPhysicalSizeClusters);
+                    lock (logObject)
+                    {
+                        ThreadUtils.InterlockedIncrement(ref fileCountSkippedByExtension);
+                        logger.Log($"Skipping file: '{fi.FullName}' by extensions list.", 1, LogLevel.Debug);
+
+                        UpdateAndShowDiskStats(ref logicalSizeClusters, ref prevPhysicalSizeClusters);
+                    }
+
                     return;
                 }
 
                 if (skipSystem && fi.Attributes.HasFlag(FileAttributes.System))
                 {
-                    logger.Log($"Skipping file: '{fi.FullName}' by system flag.", 1, LogLevel.Debug);
-                    ThreadUtils.InterlockedIncrement(ref fileCountSkippedByAttributes);
-                    ThreadUtils.InterlockedAdd(ref totalDiskBytesPhysical, prevPhysicalSizeClusters);
+                    lock (logObject)
+                    {
+                        ThreadUtils.InterlockedIncrement(ref fileCountSkippedByAttributes);
+                        logger.Log($"Skipping file: '{fi.FullName}' by system flag.", 1, LogLevel.Debug);
+
+                        UpdateAndShowDiskStats(ref logicalSizeClusters, ref prevPhysicalSizeClusters);
+                    }
+
+                    return;
+                }
+
+                //logger.Log("", 2, LogLevel.Debug);
+                var bytesArray = (fi.Name + fi.LastWriteTime).GenerateHashCode();
+                var nameHash = Convert.ToBase64String(bytesArray, Base64FormattingOptions.InsertLineBreaks);
+                var fullNameHash = "";
+
+                if (prevPhysicalSizeClusters != logicalSizeClusters && !fi.Attributes.HasFlag(FileAttributes.Compressed))
+                {
+                    lock (actualDbLockObject)
+                    {
+                        var result = AddRecordToActualFileDict(ref nameHash, ref fullNameHash, fi, prevPhysicalSizeClusters);
+                        if (result) ++actualDictEntriesCount;
+
+                        DebugCheckDuplicates(ref nameHash, ref fullNameHash, fi);
+
+                        lock (logObject)
+                        {
+                            ThreadUtils.InterlockedIncrement(ref fileCountSkipByNoChange);
+                            logger.Log(
+                                $"Skipping file: '{fi.FullName}' because it has been visited already and its size ('{fi.Length.GetMemoryString()}') did not change",
+                                1, LogLevel.Debug);
+
+                            UpdateAndShowDiskStats(ref logicalSizeClusters, ref prevPhysicalSizeClusters);
+                        }
+                    }
+
                     return;
                 }
 
@@ -310,94 +392,105 @@ namespace LZXAutoEngine
                     useForceCompress = true;
                 }
 
-                if (fi.Length > 0)
+                lock (logObject)
                 {
-                    //logger.Log("", 2, LogLevel.Debug);
-
-                    var fileHash = (fi.Name + fi.LastWriteTime).GenerateHashCode();
-
-                    lock (actualDbLockObject)
-                    {
-                        bool alreadyCompressed = fileDict.TryGetValue(fileHash, out var dictFileSize1) &&
-                                                 (dictFileSize1 == prevPhysicalSizeClusters);
-                        if (alreadyCompressed)
-                        {
-                            logger.Log(
-                                $"Skipping file: '{fi.FullName}' because it has been visited already and its size ('{fi.Length.GetMemoryString()}') did not change",
-                                1, LogLevel.Debug);
-                            ThreadUtils.InterlockedIncrement(ref fileCountSkipByNoChange);
-                            ThreadUtils.InterlockedAdd(ref totalDiskBytesPhysical, prevPhysicalSizeClusters);
-                            actualFileDict[fileHash] = prevPhysicalSizeClusters;
-#if DEBUG
-                            var debugHash = fi.FullName.GenerateHashCode();
-                            bool debugHasValue = debugFileDictStr.TryGetValue(debugHash, out var dictName3);
-                            if (debugHasValue)
-                            {
-                                logger.Log($"Replace record in debug with name: {dictName3} => {fi.FullName}");
-                            }
-                            else
-                            {
-                                debugFileDictStr[debugHash] = fi.FullName;
-                            }
-#endif
-                            return;
-                        }
-                    }
-
                     logger.Log($"Compressing file {fi.FullName}", 1, LogLevel.Debug);
-                    ThreadUtils.InterlockedIncrement(ref fileCountProcessedByCompactCommand);
+                }
 
-                    var outPut = CompactCommand($"/c /exe:LZX {(useForceCompress ? "/f" : "")} \"{fi.FullName}\"");
+                ThreadUtils.InterlockedIncrement(ref fileCountProcessedByCompactCommand);
 
-                    var currentPhysicalSizeClusters = DriveUtils.GetPhysicalFileSize(fi.FullName);
-                    lock (actualDbLockObject)
+                var outPut = CompactCommand($"/c /exe:LZX {(useForceCompress ? "/f" : "")} \"{fi.FullName}\"");
+
+                var currentPhysicalSizeClusters = DriveUtils.GetPhysicalFileSize(fi.FullName);
+                lock (actualDbLockObject)
+                {
+                    var result = AddRecordToActualFileDict(ref nameHash, ref fullNameHash, fi, currentPhysicalSizeClusters);
+                    if (result) ++actualDictEntriesCount;
+
+                    DebugCheckDuplicates(ref nameHash, ref fullNameHash, fi);
+
+                    lock (logObject)
                     {
-                        actualFileDict[fileHash] = currentPhysicalSizeClusters;
-#if DEBUG
-                        var debugHash3 = fi.FullName.GenerateHashCode();
-                        bool debugHasValue3 = debugFileDictStr.TryGetValue(debugHash3, out var dictName3);
-                        if (debugHasValue3)
-                        {
-                            logger.Log($"Replace record in debug with name: {dictName3} => {fi.FullName}");
-                        }
-                        else
-                        {
-                            debugFileDictStr[debugHash3] = fi.FullName;
-                        }
-#endif
-                    }
-
-                    if (prevPhysicalSizeClusters > currentPhysicalSizeClusters)
-                    {
+                        ThreadUtils.InterlockedAdd(ref compactCommandBytesRead, ref prevPhysicalSizeClusters);
+                        ThreadUtils.InterlockedAdd(ref compactCommandBytesWritten, ref currentPhysicalSizeClusters);
                         logger.Log(
                             $"DiskSize: {prevPhysicalSizeClusters} => {currentPhysicalSizeClusters}, fileName: {fi.FullName}");
+
+                        UpdateAndShowDiskStats(ref logicalSizeClusters, ref prevPhysicalSizeClusters);
                     }
-
-                    ThreadUtils.InterlockedAdd(ref compactCommandBytesRead, prevPhysicalSizeClusters);
-                    ThreadUtils.InterlockedAdd(ref compactCommandBytesWritten, currentPhysicalSizeClusters);
-                    ThreadUtils.InterlockedAdd(ref totalDiskBytesPhysical, currentPhysicalSizeClusters);
-
-                    logger.Log(outPut, 2, LogLevel.Debug);
                 }
             }
             catch (UnauthorizedAccessException)
             {
-                logger.Log(
-                    $"Error during processing file: {fi.FullName}.{Environment.NewLine}Exception details: System.UnauthorizedAccessException");
+                lock (logObject)
+                {
+                    logger.Log(
+                        $"Error during processing file: {fi.FullName}.{Environment.NewLine}Exception details: System.UnauthorizedAccessException");
+                }
             }
             catch (PathTooLongException)
             {
-                logger.Log(
-                    $"Error during processing file: {fi.FullName}.{Environment.NewLine}Exception details: System.IO.PathTooLongException");
+                lock (logObject)
+                {
+                    logger.Log(
+                        $"Error during processing file: {fi.FullName}.{Environment.NewLine}Exception details: System.IO.PathTooLongException");
+                }
             }
             catch (Exception ex)
             {
-                logger.Log(ex, fi);
+                lock (logObject)
+                {
+                    logger.Log(ex, fi);
+                }
             }
             finally
             {
                 Interlocked.Decrement(ref threadQueueLength);
             }
+        }
+
+        private void UpdateAndShowDiskStats(ref ulong logicalSize, ref ulong physicalSize)
+        {
+            ThreadUtils.InterlockedAdd(ref totalDiskBytesLogical, ref logicalSize);
+            ThreadUtils.InterlockedAdd(ref totalDiskBytesPhysical, ref physicalSize);
+
+            var tempTime = DateTime.Now;
+            if ((tempTime - logFileStatTime).TotalSeconds == 0) return;
+
+            logFileStatTime = tempTime;
+            logger.ShowDiskStats(actualDictEntriesCount, ref totalDiskBytesPhysical, ref totalDiskBytesLogical);
+        }
+
+        private bool AddRecordToActualFileDict(ref string nameHash, ref string fullNameHash, FileInfo fi, ulong fileSize)
+        {
+            if (actualFileDict.ContainsKey(nameHash))
+            {
+                if (fullNameHash.Length == 0)
+                    fullNameHash = Convert.ToBase64String(fi.FullName.GenerateHashCode(),
+                        Base64FormattingOptions.InsertLineBreaks);
+                return actualFileDict.TryAdd(fullNameHash, fileSize);
+            }
+
+            return actualFileDict.TryAdd(nameHash, fileSize);
+        }
+
+        private void DebugCheckDuplicates(ref string nameHash, ref string fullNameHash, FileInfo fi)
+        {
+#if DEBUG
+            var hash = fullNameHash.Length == 0 ? nameHash : fullNameHash;
+
+            if (debugFileDictStr.TryGetValue(hash, out var value))
+            {
+                lock (logObject)
+                {
+                    logger.Log($"Replace record in debug with name: {value} => {fi.FullName}");
+                }
+            }
+            else
+            {
+                debugFileDictStr.TryAdd(hash, fi.FullName);
+            }
+#endif
         }
 
         private void DirectoryRemoveCompressAttr(DirectoryInfo dirTop)
@@ -446,23 +539,26 @@ namespace LZXAutoEngine
             File.Delete(dbFileName);
         }
 
-        public void SaveDictToFile(string fileName, ConcurrentDictionary<byte[], ulong> concDict)
+        public void SaveDictToFile(string fileName, ref ConcurrentDictionary<string, ulong> concDict)
         {
             try
             {
                 lock (ThreadUtils.lockObject)
                 {
-                    var items = new SerializeDataItemList(concDict.Count);
-                    foreach (var key in concDict.Keys)
-                        items.Add(new SerializeDataItem(key, concDict[key]));
+                    if (concDict.Count == 0) return;
 
-                    using (FileStream writerFileStream = new FileStream(fileName, FileMode.Create, FileAccess.Write))
+                    var items = new SerializeDataItemList(concDict.Count);
+
+                    foreach (var hash in concDict)
+                        items.Add(new SerializeDataItem(hash.Key, hash.Value));
+
+                    using (var writerFileStream = new FileStream(fileName, FileMode.Create, FileAccess.Write))
                     {
                         logger.Log("Saving file...", 1, LogLevel.Debug);
 
                         if (binaryDb)
                         {
-                            BinaryFormatter binaryFormatter = new BinaryFormatter();
+                            var binaryFormatter = new BinaryFormatter();
 
                             var dict = concDict.ToDictionary(a => a.Key, b => b.Value);
                             binaryFormatter.Serialize(writerFileStream, dict);
@@ -488,27 +584,30 @@ namespace LZXAutoEngine
             }
         }
 
-        public ConcurrentDictionary<byte[], ulong> LoadDictFromFile(string fileName)
+        public ConcurrentDictionary<string, ulong> LoadDictFromFile(string fileName)
         {
-            var retVal = new ConcurrentDictionary<byte[], ulong>();
+            var retVal = new ConcurrentDictionary<string, ulong>();
 
             if (File.Exists(fileName))
                 try
                 {
                     logger.Log("Dictionary file found");
 
+                    retVal.Clear();
+                    dictEntriesCount = 0;
+
                     using (var readerFileStream = new FileStream(fileName, FileMode.Open, FileAccess.Read))
                     {
                         if (readerFileStream.Length > 0)
                         {
+                            var deserializeData = new object();
                             if (binaryDb)
                             {
-                                BinaryFormatter binaryFormatter = new BinaryFormatter();
+                                var binaryFormatter = new BinaryFormatter();
 
                                 try
                                 {
-                                    var dict = binaryFormatter.Deserialize(readerFileStream);
-                                    retVal = new ConcurrentDictionary<byte[], ulong>((Dictionary<byte[], ulong>)dict);
+                                    deserializeData = binaryFormatter.Deserialize(readerFileStream);
                                 }
                                 catch (Exception)
                                 {
@@ -520,12 +619,9 @@ namespace LZXAutoEngine
                                 var serial = new XmlSerializer(typeof(SerializeDataItemList),
                                     new[] { typeof(SerializeDataItemList) });
 
-                                retVal.Clear();
                                 try
                                 {
-                                    if (serial.Deserialize(readerFileStream) is List<SerializeDataItem> tempList)
-                                        foreach (var item in tempList)
-                                            retVal.TryAdd(item.Key, item.Value);
+                                    deserializeData = serial.Deserialize(readerFileStream);
                                 }
                                 catch (Exception)
                                 {
@@ -533,13 +629,19 @@ namespace LZXAutoEngine
                                 }
                             }
 
+                            if (deserializeData is SerializeDataItemList tempList)
+                            {
+                                foreach (var item in tempList.ToList())
+                                    retVal.TryAdd(item.Key, item.Value);
+
+                                dictEntriesCount = (uint)retVal.Count;
+                            }
+
                             readerFileStream.Close();
                         }
                     }
 
-                    dictEntriesCount0 = (uint)retVal.Count;
-
-                    logger.Log($"Loaded from file ({dictEntriesCount0} entries){Environment.NewLine}");
+                    logger.Log($"Loaded from file ({dictEntriesCount} entries){Environment.NewLine}");
                 }
                 catch (Exception ex)
                 {
@@ -578,7 +680,7 @@ namespace LZXAutoEngine
         [XmlRoot("Object")]
         public class SerializeDataItem
         {
-            public byte[] Key;
+            public string Key;
             public ulong Value;
 
             public SerializeDataItem()
@@ -586,7 +688,7 @@ namespace LZXAutoEngine
                 Value = 0;
             }
 
-            public SerializeDataItem(byte[] key, ulong value)
+            public SerializeDataItem(string key, ulong value)
             {
                 Key = key;
                 Value = value;
@@ -600,18 +702,24 @@ namespace LZXAutoEngine
             public List<SerializeDataItem> Objects;
 
             // Constructor
-            public SerializeDataItemList(int count)
-            {
-                Objects = new List<SerializeDataItem>(count);
-            }
             public SerializeDataItemList()
             {
                 Objects = new List<SerializeDataItem>();
             }
 
+            public SerializeDataItemList(int count)
+            {
+                Objects = new List<SerializeDataItem>(count);
+            }
+
             public void Add(SerializeDataItem serializeDataItem)
             {
                 Objects.Add(serializeDataItem);
+            }
+
+            public List<SerializeDataItem> ToList()
+            {
+                return Objects;
             }
         }
     }

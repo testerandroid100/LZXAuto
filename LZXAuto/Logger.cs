@@ -7,17 +7,21 @@ namespace LZXAutoEngine
     public class Logger
     {
         private const string logFileName = "Activity.log";
+        public const int chunkSize = 10;
         private readonly object lockObject = new object();
+        private int chunkRecords;
 
         private string logMessage;
-        private int chunkRecords;
-        public const int chunkSize = 10;
 
         public Logger(LogLevel logLevel)
         {
             LogLevel = logLevel;
             chunkRecords = 0;
         }
+
+        public LogLevel LogLevel { get; set; }
+
+        public string TimeStamp => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " ";
 
         ~Logger()
         {
@@ -27,10 +31,6 @@ namespace LZXAutoEngine
             chunkRecords = 0;
             logMessage = "";
         }
-
-        public LogLevel LogLevel { get; set; }
-
-        public string TimeStamp => DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " ";
 
         public void Log(Exception ex, DirectoryInfo di)
         {
@@ -63,7 +63,7 @@ namespace LZXAutoEngine
             if ((int)LogLevel < (int)level) return;
 
             var sb = new StringBuilder();
-            for (var i = 0; i < newLinePrefix; ++i) sb.AppendLine();
+            for (var i = 0; i < newLinePrefix - 1; ++i) sb.AppendLine();
 
             if (!string.IsNullOrEmpty(str))
             {
@@ -80,7 +80,9 @@ namespace LZXAutoEngine
             {
                 ++chunkRecords;
                 if (chunkRecords <= chunkSize)
-                    logMessage += result;
+                {
+                    logMessage += "\n" + result;
+                }
                 else
                 {
                     File.AppendAllText(logFileName, logMessage);
@@ -88,6 +90,14 @@ namespace LZXAutoEngine
                     logMessage = "";
                 }
             }
+        }
+
+        public void ShowDiskStats(int actualFiles, ref ulong totalDiskBytesPhysical, ref ulong totalDiskBytesLogical)
+        {
+            var str =
+                $"Current progress: Files - {actualFiles}, Disk physical/logical: {totalDiskBytesPhysical.GetMemoryString()}/{totalDiskBytesLogical.GetMemoryString()}";
+            Console.WriteLine(str);
+            Console.SetCursorPosition(0, Console.CursorTop - 1);
         }
     }
 

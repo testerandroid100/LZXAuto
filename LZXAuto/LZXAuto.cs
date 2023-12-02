@@ -17,7 +17,7 @@ namespace LZXAuto
 
         private static LZXAutoEngine.LZXAutoEngine CompressorEngine = new LZXAutoEngine.LZXAutoEngine();
 
-        ~LZXAuto()      // finalizer
+        ~LZXAuto() // finalizer
         {
             CompressorEngine = null;
         }
@@ -144,7 +144,8 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
 
                     commandLineRequestedPath = arg;
                     if (commandLineRequestedPath.EndsWith("\""))
-                        commandLineRequestedPath = commandLineRequestedPath.Remove(commandLineRequestedPath.Length-1, 1);
+                        commandLineRequestedPath =
+                            commandLineRequestedPath.Remove(commandLineRequestedPath.Length - 1, 1);
 
                     if (!commandLineRequestedPath.EndsWith("\\")) commandLineRequestedPath += "\\";
                 }
@@ -231,10 +232,10 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
                 var jsonDict = Json.Deserialize<Dictionary<string, dynamic>>(file);
 
                 var extList = new List<string>();
-                var extArray = jsonDict["skipFileExtensions"];
-                foreach (var ext in extArray)
+                if (jsonDict != null)
                 {
-                    extList.Add(Convert.ToString(ext));
+                    var extArray = jsonDict["skipFileExtensions"];
+                    foreach (var ext in extArray) extList.Add(Convert.ToString(ext));
                 }
 
                 skipFileExtensions = extList.ToArray();

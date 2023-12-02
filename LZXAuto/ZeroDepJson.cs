@@ -1882,7 +1882,7 @@ namespace ZeroDep
                 }
 
 #pragma warning disable CA1825 // Avoid zero-length array allocations
-            WriteArray(writer, array, objectGraph, options, new int[0]);
+            WriteArray(writer, array, objectGraph, options, Array.Empty<int>());
 #pragma warning restore CA1825 // Avoid zero-length array allocations
         }
 
@@ -2498,10 +2498,8 @@ namespace ZeroDep
         private static T GetAttribute<T>(this AttributeCollection attributes) where T : Attribute
         {
             foreach (var att in attributes)
-            {
                 if (att is T attribute)
                     return attribute;
-            }
 
             return null;
         }
@@ -3287,7 +3285,7 @@ namespace ZeroDep
                     if (!_iskvpe.TryGetValue(type, out var kv))
                     {
                         kv = new KeyValueType();
-                        bool result = InternalIsKeyValuePairEnumerable(type, out kv.KeyType, out kv.ValueType);
+                        var result = InternalIsKeyValuePairEnumerable(type, out kv.KeyType, out kv.ValueType);
                         if (!result)
                         {
                             keyType = null;

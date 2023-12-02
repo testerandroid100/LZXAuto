@@ -4,7 +4,7 @@
     {
         public static object lockObject = new object();
 
-        public static void InterlockedAdd(ref ulong variable, ulong value)
+        public static void InterlockedAdd(ref ulong variable, ref ulong value)
         {
             lock (lockObject)
             {
@@ -16,7 +16,7 @@
         {
             lock (lockObject)
             {
-                variable++;
+                ++variable;
             }
         }
     }
