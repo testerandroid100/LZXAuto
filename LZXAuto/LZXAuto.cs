@@ -53,9 +53,13 @@ General - Session start / end timestamp, skipped folders
 Info    - General + statistics about current session
 Debug   - Info + information about every file
 
+/resetDb - resets db. On next run, all files will be traversed by Compact command.
+
 /scheduleOn - enables Task Scheduler entry to run LZXAuto when computer is idle for 10 minutes. Task runs daily.
 
 /scheduleOff - disables Task Scheduler entry
+
+/dbType:none - use database (default - xml, alternative - none, binary)
 
 /skipSystem:off - process system files (default - on)
 
@@ -90,6 +94,12 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
 ");
 
                 return;
+            }
+
+            // Parse resetDb option
+            if (args != null && args.Contains("/resetDb", StringComparer.InvariantCultureIgnoreCase))
+            {
+                CompressorEngine.ResetDb();
             }
 
             CompressorEngine.logger.LogLevel = LogLevel.Info;
@@ -205,6 +215,15 @@ Version number: {Assembly.GetEntryAssembly()?.GetName().Version}
                     return;
                 }
 
+                // Database type
+                if (args.Contains("/dbType:none", StringComparer.InvariantCultureIgnoreCase))
+                    CompressorEngine.dbType = LZXAutoEngine.LZXAutoEngine.DbType.Nome;
+                else if (args.Contains("/dbType:binary", StringComparer.InvariantCultureIgnoreCase))
+                    CompressorEngine.dbType = LZXAutoEngine.LZXAutoEngine.DbType.Binary;
+                else if (args.Contains("/dbType:xml", StringComparer.InvariantCultureIgnoreCase))
+                    CompressorEngine.dbType = LZXAutoEngine.LZXAutoEngine.DbType.Xml;
+
+                // Compress system files
                 if (args.Contains("/skipSystem:off", StringComparer.InvariantCultureIgnoreCase))
                     CompressorEngine.skipSystem = false;
             }
